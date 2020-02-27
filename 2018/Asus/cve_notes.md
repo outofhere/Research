@@ -12,6 +12,7 @@ The exploit could be found within the article itself.
 (See pictures: rce_debugger_crash.png)
 
 CVE-2018-8877 - IP disclosure
+
 CVE-2018-8878 - MAC disclosure
 
 Two other vulnerabilities disclose internal general IP-range and also MAC-addresses and hostnames of devices, connected to the router. MAC-addresses could be seen after accessing same blocking.asp page, they located at custom_id variable and being URL decoded.
