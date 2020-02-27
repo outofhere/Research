@@ -9,6 +9,7 @@ This is a buffer overflow vulnerability in blocking.asp page that is publicly av
 All of these parameters are supplied with long enough buffer triggers a crash within httpds daemon with arbitrary overwrite of PC register that could lead to remote code execution.
 
 The exploit could be found within the article itself.
+(See pictures: rce_debugger_crash.png)
 
 CVE-2018-8877 - IP disclosure
 CVE-2018-8878 - MAC disclosure
@@ -17,9 +18,12 @@ Two other vulnerabilities disclose internal general IP-range and also MAC-addres
 IP-address is visible at error_page.htm at new_lan_ip variable.
 
 Since both pages are, again, available to non-authenticated user so could potentially be classified as information leakage.
+(See pictures: disclosure_1.png, disclosure_2.png in the repo)
 
 Additional links:
+
 Fix in Asus Merlin: https://www.asuswrt-merlin.net/changelog-382
+
 Fix in Asus stock firmware, sample: https://www.asus.com/Networking/RTAC66U/HelpDesk_BIOS/
 
 These vulnerablities were found with help of Andrey Basarygin.
