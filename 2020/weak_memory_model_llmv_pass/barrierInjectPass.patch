@@ -1,0 +1,442 @@
+From ac8c2706aacd8ad44ba392b8f98256b9d8f2c16c Mon Sep 17 00:00:00 2001
+From: Igor Chervatyuk <ichervatyuk@gmail.com>
+Date: Sun, 17 May 2020 16:01:12 +0300
+Subject: [PATCH 1/4] Initial commit. Ripping off basic hello pass
+
+---
+ .../BarrierInject/BarrierInject.cpp           | 20 +++++++++++++++++++
+ .../BarrierInject/BarrierInject.exports       |  0
+ .../Transforms/BarrierInject/CMakeLists.txt   | 18 +++++++++++++++++
+ llvm/lib/Transforms/CMakeLists.txt            |  1 +
+ 4 files changed, 39 insertions(+)
+ create mode 100644 llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+ create mode 100644 llvm/lib/Transforms/BarrierInject/BarrierInject.exports
+ create mode 100644 llvm/lib/Transforms/BarrierInject/CMakeLists.txt
+
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+new file mode 100644
+index 00000000000..1b7ff34f194
+--- /dev/null
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+@@ -0,0 +1,20 @@
++#include "llvm/IR/Function.h"
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++using namespace llvm;
++
++namespace {
++  struct BarrierInject : public FunctionPass {
++    static char ID; // Pass identification, replacement for typeid
++    BarrierInject() : FunctionPass(ID) {}
++
++    bool runOnFunction(Function &F) override {
++      errs() << "Test: ";
++      errs().write_escaped(F.getName()) << '\n';
++      return false;
++    }
++  };
++}
++
++char BarrierInject::ID = 0;
++static RegisterPass<BarrierInject> X("barrierinject", "Barrier inject placeholder");
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.exports b/llvm/lib/Transforms/BarrierInject/BarrierInject.exports
+new file mode 100644
+index 00000000000..e69de29bb2d
+diff --git a/llvm/lib/Transforms/BarrierInject/CMakeLists.txt b/llvm/lib/Transforms/BarrierInject/CMakeLists.txt
+new file mode 100644
+index 00000000000..ab5c69dca24
+--- /dev/null
++++ b/llvm/lib/Transforms/BarrierInject/CMakeLists.txt
+@@ -0,0 +1,18 @@
++if( NOT LLVM_REQUIRES_RTTI )
++  if( NOT LLVM_REQUIRES_EH )
++    set(LLVM_EXPORTED_SYMBOL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/BarrierInject.exports)
++  endif()
++endif()
++
++if(WIN32 OR CYGWIN)
++  set(LLVM_LINK_COMPONENTS Core Support)
++endif()
++
++add_llvm_library( LLVMBarrierInject MODULE BUILDTREE_ONLY
++  BarrierInject.cpp
++
++  DEPENDS
++  intrinsics_gen
++  PLUGIN_TOOL
++  opt
++  )
+diff --git a/llvm/lib/Transforms/CMakeLists.txt b/llvm/lib/Transforms/CMakeLists.txt
+index dda5f6de11e..d9a174730d3 100644
+--- a/llvm/lib/Transforms/CMakeLists.txt
++++ b/llvm/lib/Transforms/CMakeLists.txt
+@@ -9,3 +9,4 @@ add_subdirectory(Hello)
+ add_subdirectory(ObjCARC)
+ add_subdirectory(Coroutines)
+ add_subdirectory(CFGuard)
++add_subdirectory(BarrierInject)
+-- 
+2.20.1
+
+
+From ffee9a447af983122f81a87c7bbd6624fa76897a Mon Sep 17 00:00:00 2001
+From: Igor Chervatyuk <ichervatyuk@gmail.com>
+Date: Tue, 19 May 2020 02:10:10 +0300
+Subject: [PATCH 2/4] [pass] Added pass that runs on bitcode to extract
+ function names that appear in threading routine
+
+---
+ .../BarrierInject/BarrierInject.cpp           | 99 ++++++++++++++++---
+ .../Transforms/BarrierInject/BarrierInject.h  | 42 ++++++++
+ 2 files changed, 127 insertions(+), 14 deletions(-)
+ create mode 100644 llvm/lib/Transforms/BarrierInject/BarrierInject.h
+
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+index 1b7ff34f194..fa20d8bc80f 100644
+--- a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+@@ -1,20 +1,91 @@
+-#include "llvm/IR/Function.h"
+-#include "llvm/Pass.h"
+-#include "llvm/Support/raw_ostream.h"
++//=============================================================================
++// FILE:
++//    BarrierInject.cpp
++//
++// DESCRIPTION:
++//    Visits all instructions in a function and counts how many times every
++//    Current pass goes throug bitcode in order to find all instances of
++//    pthread_create to extract running functions. They are being returned
++//    with StringMap instance.
++//
++// USAGE:
++//      opt -load libBarrierInject.so -barrier-inject\
++//        -disable-output <input-llvm-file>
++//
++// License: MIT
++//=============================================================================
++#include "BarrierInject.h"
++
++#include "llvm/IR/LegacyPassManager.h"
++#include "llvm/Passes/PassBuilder.h"
++#include "llvm/Passes/PassPlugin.h"
++#include "llvm/Transforms/IPO/PassManagerBuilder.h"
++
+ using namespace llvm;
++  //llvm::StringMap<Value *> OperandMap;
++    //llvm::errs() << "Run kitty: " << Func.getName()
++    //             << "\n";
++      //llvm::errs() << "Run little: " << Name
++      //             << "\n";
++        //llvm::errs() << "This is call"
++        //             << "\n";
++          //OperandMap[std::to_string(i)] = Inst.getOperand(i);
+ 
+-namespace {
+-  struct BarrierInject : public FunctionPass {
+-    static char ID; // Pass identification, replacement for typeid
+-    BarrierInject() : FunctionPass(ID) {}
++//-----------------------------------------------------------------------------
++// BarrierInject implementation
++//-----------------------------------------------------------------------------
++llvm::StringMap<unsigned> BarrierInject::findThreadingFunctions(Function &Func) {
++  llvm::StringMap<unsigned> OperandMap;
++  llvm::StringMap<unsigned> FunctionListMap;
+ 
+-    bool runOnFunction(Function &F) override {
+-      errs() << "Test: ";
+-      errs().write_escaped(F.getName()) << '\n';
+-      return false;
++  for (auto &BB : Func) {
++    for (auto &Inst : BB) {
++      StringRef OpcodeName = Inst.getOpcodeName();
++      // Looking for call LLVM IR opcodes.
++      // Putting operands to map in case of some large calling structures
++      // to look up faster.
++      if (OpcodeName.compare("call") == 0) {
++        for (unsigned i = 0, e = Inst.getNumOperands(); i != e; ++i) {
++          OperandMap[Inst.getOperand(i)->getName()] = i;
++        }
++        // Searching for pthread_create and others thread routines
++        // TBI: other thread routines
++        auto search = OperandMap.find("pthread_create");
++        if (search != OperandMap.end()) {
++          auto FunctionOperandName = Inst.getOperand(2)->getName();
++          if (FunctionListMap.find(FunctionOperandName) == FunctionListMap.end()) {
++            FunctionListMap[FunctionOperandName] = 0;
++          }
++        }
++      }
++      OperandMap.clear();
+     }
+-  };
++  }
++  printStringMap(FunctionListMap);
++  return FunctionListMap;
++}
++
++bool LegacyBarrierInject::runOnFunction(llvm::Function &Func) {
++  Impl.findThreadingFunctions(Func);
++  return false;
+ }
+ 
+-char BarrierInject::ID = 0;
+-static RegisterPass<BarrierInject> X("barrierinject", "Barrier inject placeholder");
++//-----------------------------------------------------------------------------
++// Legacy PM Registration
++//-----------------------------------------------------------------------------
++char LegacyBarrierInject::ID = 0;
++
++static RegisterPass<LegacyBarrierInject> X(/*PassArg=*/"barrier-inject",
++                                           /*Name=*/"BarrierInject Pass",
++                                           /*CFGOnly=*/true,
++                                           /*is_analysis=*/false);
++
++//------------------------------------------------------------------------------
++// Helper functions
++//------------------------------------------------------------------------------
++void printStringMap(const llvm::StringMap<unsigned> &FunctionListMap) {
++  for (auto &Item : FunctionListMap) {
++    llvm::errs() << "FunctionListMap entry: " << Item.first()
++                 << "\n";
++  }
++}
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.h b/llvm/lib/Transforms/BarrierInject/BarrierInject.h
+new file mode 100644
+index 00000000000..70d843524a7
+--- /dev/null
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.h
+@@ -0,0 +1,42 @@
++//========================================================================
++// FILE:
++//    BarrierInject.h
++//
++// DESCRIPTION:
++//    Declares the BarrierInject Pass
++//
++// License: MIT
++//========================================================================
++
++#include "llvm/ADT/StringMap.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/PassManager.h"
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++
++//------------------------------------------------------------------------------
++// New PM interface
++//------------------------------------------------------------------------------
++struct BarrierInject : public llvm::PassInfoMixin<BarrierInject> {
++  using Result = llvm::StringMap<unsigned>;
++  llvm::PreservedAnalyses run(llvm::Function &F,
++                              llvm::FunctionAnalysisManager &);
++  llvm::StringMap<unsigned> findThreadingFunctions(llvm::Function &F);
++};
++
++//------------------------------------------------------------------------------
++// Legacy PM interface
++//------------------------------------------------------------------------------
++struct LegacyBarrierInject : public llvm::FunctionPass {
++  static char ID;
++  LegacyBarrierInject() : llvm::FunctionPass(ID) {}
++  bool runOnFunction(llvm::Function &F) override;
++
++  BarrierInject Impl;
++};
++
++//------------------------------------------------------------------------------
++// Helper functions
++//------------------------------------------------------------------------------
++// Debug-prints for StringMaps
++void printStringMap(const llvm::StringMap<unsigned> &FunctionListMap);
+-- 
+2.20.1
+
+
+From 3f89355e7f50677a9b11052e59b3b9d4a11df4af Mon Sep 17 00:00:00 2001
+From: Igor Chervatyuk <ichervatyuk@gmail.com>
+Date: Wed, 20 May 2020 19:17:56 +0300
+Subject: [PATCH 3/4] [pass] Pass work on modules instead of passed functions
+
+---
+ .../BarrierInject/BarrierInject.cpp           | 61 ++++++++++++-------
+ .../Transforms/BarrierInject/BarrierInject.h  | 10 +--
+ 2 files changed, 44 insertions(+), 27 deletions(-)
+
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+index fa20d8bc80f..c7b24a0b94e 100644
+--- a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+@@ -34,39 +34,54 @@ using namespace llvm;
+ //-----------------------------------------------------------------------------
+ // BarrierInject implementation
+ //-----------------------------------------------------------------------------
+-llvm::StringMap<unsigned> BarrierInject::findThreadingFunctions(Function &Func) {
++llvm::StringMap<unsigned> BarrierInject::findThreadingFunctions(llvm::Module &Module) {
+   llvm::StringMap<unsigned> OperandMap;
+   llvm::StringMap<unsigned> FunctionListMap;
+-
+-  for (auto &BB : Func) {
+-    for (auto &Inst : BB) {
+-      StringRef OpcodeName = Inst.getOpcodeName();
+-      // Looking for call LLVM IR opcodes.
+-      // Putting operands to map in case of some large calling structures
+-      // to look up faster.
+-      if (OpcodeName.compare("call") == 0) {
+-        for (unsigned i = 0, e = Inst.getNumOperands(); i != e; ++i) {
+-          OperandMap[Inst.getOperand(i)->getName()] = i;
+-        }
+-        // Searching for pthread_create and others thread routines
+-        // TBI: other thread routines
+-        auto search = OperandMap.find("pthread_create");
+-        if (search != OperandMap.end()) {
+-          auto FunctionOperandName = Inst.getOperand(2)->getName();
+-          if (FunctionListMap.find(FunctionOperandName) == FunctionListMap.end()) {
+-            FunctionListMap[FunctionOperandName] = 0;
++  for (auto &Func : Module) {
++    for (auto &BB : Func) {
++      for (auto &Inst : BB) {
++        StringRef OpcodeName = Inst.getOpcodeName();
++        // Looking for call LLVM IR opcodes.
++        // Putting operands to map in case of some large calling structures
++        // to look up faster.
++        if (OpcodeName.compare("call") == 0) {
++          for (unsigned i = 0, e = Inst.getNumOperands(); i != e; ++i) {
++            OperandMap[Inst.getOperand(i)->getName()] = i;
++          }
++          // Searching for pthread_create and others thread routines
++          // TBI: other thread routines
++          auto search = OperandMap.find("pthread_create");
++          if (search != OperandMap.end()) {
++            auto FunctionOperandName = Inst.getOperand(2)->getName();
++            if (FunctionListMap.find(FunctionOperandName) == FunctionListMap.end()) {
++              FunctionListMap[FunctionOperandName] = 0;
++            }
+           }
+         }
++        OperandMap.clear();
+       }
+-      OperandMap.clear();
+     }
+   }
+-  printStringMap(FunctionListMap);
+   return FunctionListMap;
+ }
+ 
+-bool LegacyBarrierInject::runOnFunction(llvm::Function &Func) {
+-  Impl.findThreadingFunctions(Func);
++void insertBarrierToBB(llvm::Module &Module,
++                       llvm::StringMap<unsigned> &FunctionListMap) {
++  for (auto &Func : Module) {
++    for (auto &BB : Func) {
++      llvm::errs() << "Run little: " << Func.getName() << "\n";
++      for (auto &Inst : BB) {
++      }
++    }
++  }
++}
++
++bool LegacyBarrierInject::runOnModule(llvm::Module &Module) {
++  llvm::StringMap<unsigned> FunctionListMap;
++  FunctionListMap = Impl.findThreadingFunctions(Module);
++  printStringMap(FunctionListMap);
++  llvm::errs() << "barrier" << "\n";
++  insertBarrierToBB(Module, FunctionListMap);
+   return false;
+ }
+ 
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.h b/llvm/lib/Transforms/BarrierInject/BarrierInject.h
+index 70d843524a7..9fe38ed2d79 100644
+--- a/llvm/lib/Transforms/BarrierInject/BarrierInject.h
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.h
+@@ -21,16 +21,18 @@ struct BarrierInject : public llvm::PassInfoMixin<BarrierInject> {
+   using Result = llvm::StringMap<unsigned>;
+   llvm::PreservedAnalyses run(llvm::Function &F,
+                               llvm::FunctionAnalysisManager &);
+-  llvm::StringMap<unsigned> findThreadingFunctions(llvm::Function &F);
++  llvm::StringMap<unsigned> findThreadingFunctions(llvm::Module &M);
++  void insertBarrierToBB(llvm::Module &M,
++                         llvm::StringMap<unsigned> &MP);
+ };
+ 
+ //------------------------------------------------------------------------------
+ // Legacy PM interface
+ //------------------------------------------------------------------------------
+-struct LegacyBarrierInject : public llvm::FunctionPass {
++struct LegacyBarrierInject : public llvm::ModulePass {
+   static char ID;
+-  LegacyBarrierInject() : llvm::FunctionPass(ID) {}
+-  bool runOnFunction(llvm::Function &F) override;
++  LegacyBarrierInject() : llvm::ModulePass(ID) {}
++  bool runOnModule(llvm::Module &M) override;
+ 
+   BarrierInject Impl;
+ };
+-- 
+2.20.1
+
+
+From e7b6d339944271f07bac850eca08f34c9385321c Mon Sep 17 00:00:00 2001
+From: Igor Chervatyuk <ichervatyuk@gmail.com>
+Date: Sun, 24 May 2020 15:17:19 +0300
+Subject: [PATCH 4/4] Removing debug functions and prints
+
+---
+ .../BarrierInject/BarrierInject.cpp           | 29 ++++++++++++-------
+ 1 file changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+index c7b24a0b94e..125315d8899 100644
+--- a/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
++++ b/llvm/lib/Transforms/BarrierInject/BarrierInject.cpp
+@@ -17,19 +17,13 @@
+ #include "BarrierInject.h"
+ 
+ #include "llvm/IR/LegacyPassManager.h"
++#include "llvm/IR/IRBuilder.h"
+ #include "llvm/Passes/PassBuilder.h"
+ #include "llvm/Passes/PassPlugin.h"
+ #include "llvm/Transforms/IPO/PassManagerBuilder.h"
++#include "llvm/IR/Type.h"
+ 
+ using namespace llvm;
+-  //llvm::StringMap<Value *> OperandMap;
+-    //llvm::errs() << "Run kitty: " << Func.getName()
+-    //             << "\n";
+-      //llvm::errs() << "Run little: " << Name
+-      //             << "\n";
+-        //llvm::errs() << "This is call"
+-        //             << "\n";
+-          //OperandMap[std::to_string(i)] = Inst.getOperand(i);
+ 
+ //-----------------------------------------------------------------------------
+ // BarrierInject implementation
+@@ -68,9 +62,22 @@ llvm::StringMap<unsigned> BarrierInject::findThreadingFunctions(llvm::Module &Mo
+ void insertBarrierToBB(llvm::Module &Module,
+                        llvm::StringMap<unsigned> &FunctionListMap) {
+   for (auto &Func : Module) {
+-    for (auto &BB : Func) {
+-      llvm::errs() << "Run little: " << Func.getName() << "\n";
+-      for (auto &Inst : BB) {
++    if (Func.isDeclaration())
++      continue;
++    if (FunctionListMap.find(Func.getName()) != FunctionListMap.end()) {
++      llvm::errs() << "Mark " << Func.getName() << "\n";
++      for (auto &BB : Func) {
++        BB.getInstList();
++        for (auto &Inst : BB) {
++          // opcode for load:  32
++          // opcode for store: 33
++          if (Inst.getOpcode() == 32/* | Inst.getOpcode() == 33*/) {
++            Instruction * f = new FenceInst(BB.getContext(),
++                                            AtomicOrdering::SequentiallyConsistent,
++                                            llvm::SyncScope::System,
++                                            &Inst);
++          }
++        }
+       }
+     }
+   }
+-- 
+2.20.1
+
